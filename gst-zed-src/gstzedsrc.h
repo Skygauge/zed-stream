@@ -90,6 +90,12 @@ struct _GstZedSrc {
     gboolean fill_mode;
     gboolean remove_saturated_areas;
 
+    gboolean sdk_stream_enable;
+    gint sdk_stream_port;
+    gint sdk_stream_codec;
+    gint sdk_stream_bitrate;
+    gboolean sdk_stream_active;
+
     gboolean pos_tracking;
     gboolean camera_static;
     GString *area_file_path;

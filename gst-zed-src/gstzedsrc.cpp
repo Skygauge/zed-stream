@@ -202,6 +202,10 @@ enum {
     PROP_CAM_RES,
     PROP_CAM_FPS,
     PROP_STREAM_TYPE,
+    PROP_SDK_STREAM_ENABLE,
+    PROP_SDK_STREAM_PORT,
+    PROP_SDK_STREAM_CODEC,
+    PROP_SDK_STREAM_BITRATE,
     PROP_SDK_VERBOSE,
     PROP_CAM_FLIP,
     PROP_CAM_ID,
@@ -451,6 +455,12 @@ typedef enum {
 #define DEFAULT_PROP_3D_REF_FRAME static_cast<gint>(sl::REFERENCE_FRAME::WORLD)
 #define DEFAULT_PROP_FILL_MODE FALSE
 #define DEFAULT_PROP_REMOVE_SATURATED_AREAS FALSE
+
+// STREAMING
+#define DEFAULT_PROP_SDK_STREAM_CODEC static_cast<gint>(sl::STREAMING_CODEC::H265)
+#define DEFAULT_PROP_SDK_STREAM_BITRATE 32000
+#define DEFAULT_PROP_SDK_STREAM_PORT 30000
+#define DEFAULT_PROP_SDK_STREAM_ENABLE FALSE
 
 // POSITIONAL TRACKING
 #define DEFAULT_PROP_POS_TRACKING FALSE
@@ -916,6 +926,24 @@ static GType gst_zedsrc_3d_meas_ref_frame_get_type(void) {
     return zedsrc_3d_meas_ref_frame_type;
 }
 
+#define GST_TYPE_ZED_SDK_STREAM_CODEC (gst_zedsrc_sdk_stream_codec_get_type())
+static GType gst_zedsrc_sdk_stream_codec_get_type(void) {
+    static GType zedsrc_sdk_stream_codec_type = 0;
+
+    if (!zedsrc_sdk_stream_codec_type) {
+        static GEnumValue codec_types[] = {
+            {static_cast<gint>(sl::STREAMING_CODEC::H265), "H.265 codec", "H.265"},
+            {static_cast<gint>(sl::STREAMING_CODEC::H264), "H.264 codec", "H.264"},
+            {0, NULL, NULL},
+        };
+
+        zedsrc_sdk_stream_codec_type = 
+            g_enum_register_static("GstZedsrcSdkStreamCodec", codec_types);
+    }
+
+    return zedsrc_sdk_stream_codec_type;
+}
+
 /* pad templates */
 static GstStaticPadTemplate gst_zedsrc_src_template = GST_STATIC_PAD_TEMPLATE(
     "src", GST_PAD_SRC, GST_PAD_ALWAYS,
@@ -1197,6 +1225,36 @@ static void gst_zedsrc_class_init(GstZedSrcClass *klass) {
                              "Disable the self calibration processing when the camera is opened",
                              DEFAULT_PROP_DIS_SELF_CALIB,
                              (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+
+    g_object_class_install_property(
+        gobject_class, PROP_SDK_STREAM_CODEC,
+        g_param_spec_enum("sdk-stream-codec", "SDK Stream Codec",
+                          "Codec used by ZED SDK for output streaming",
+                          GST_TYPE_ZED_SDK_STREAM_CODEC,
+                          DEFAULT_PROP_SDK_STREAM_CODEC,
+                          (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+
+    g_object_class_install_property(
+        gobject_class, PROP_SDK_STREAM_BITRATE,
+        g_param_spec_int("sdk-stream-bitrate", "SDK Stream Bitrate",
+                         "Bitrate used by ZED SDK for output streaming",
+                         1000, 100000, DEFAULT_PROP_SDK_STREAM_BITRATE,
+                         (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+
+    g_object_class_install_property(
+        gobject_class, PROP_SDK_STREAM_PORT,
+        g_param_spec_int("sdk-stream-port", "SDK Stream Port",
+                         "Port used by ZED SDK for output streaming",
+                         1, 65535, DEFAULT_PROP_SDK_STREAM_PORT,
+                         (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+
+    g_object_class_install_property(
+        gobject_class, PROP_SDK_STREAM_ENABLE,
+        g_param_spec_boolean("sdk-stream-enable", "SDK Stream Enable",
+                             "Enable the SDK stream",
+                             DEFAULT_PROP_SDK_STREAM_ENABLE,
+                             (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+                        
 
     /*g_object_class_install_property( gobject_class, PROP_RIGHT_DEPTH_ENABLE,
                                      g_param_spec_boolean("enable-right-side-measure", "Enable right
@@ -1884,6 +1942,11 @@ static void gst_zedsrc_init(GstZedSrc *src) {
     src->svo_file = g_string_new(DEFAULT_PROP_SVO_FILE);
     src->opencv_calibration_file = g_string_new(DEFAULT_PROP_OPENCV_CALIB_FILE);
     src->stream_ip = g_string_new(DEFAULT_PROP_STREAM_IP);
+    src->sdk_stream_enable = FALSE;
+    src->sdk_stream_port = 30000;
+    src->sdk_stream_codec = DEFAULT_PROP_SDK_STREAM_CODEC;
+    src->sdk_stream_bitrate = 32000;
+    src->sdk_stream_active = FALSE;
 
     src->stream_port = DEFAULT_PROP_STREAM_PORT;
     src->stream_type = DEFAULT_PROP_STREAM_TYPE;
@@ -2056,6 +2119,18 @@ void gst_zedsrc_set_property(GObject *object, guint property_id, const GValue *v
     case PROP_STREAM_IP:
         str = g_value_get_string(value);
         g_string_assign(src->stream_ip, str);
+        break;
+    case PROP_SDK_STREAM_ENABLE:
+        src->sdk_stream_enable = g_value_get_boolean(value);
+        break;
+    case PROP_SDK_STREAM_PORT:
+        src->sdk_stream_port = g_value_get_int(value);
+        break;
+    case PROP_SDK_STREAM_CODEC:
+        src->sdk_stream_codec = g_value_get_enum(value);
+        break;
+    case PROP_SDK_STREAM_BITRATE:
+        src->sdk_stream_bitrate = g_value_get_int(value);
         break;
     case PROP_STREAM_PORT:
         src->stream_port = g_value_get_int(value);
@@ -2456,6 +2531,18 @@ void gst_zedsrc_get_property(GObject *object, guint property_id, GValue *value, 
         break;
     case PROP_STREAM_TYPE:
         g_value_set_enum(value, src->stream_type);
+        break;
+    case PROP_SDK_STREAM_ENABLE:
+        g_value_set_boolean(value, src->sdk_stream_enable);
+        break;
+    case PROP_SDK_STREAM_PORT:
+        g_value_set_int(value, src->sdk_stream_port);
+        break;
+    case PROP_SDK_STREAM_CODEC:
+        g_value_set_enum(value, src->sdk_stream_codec);
+        break;
+    case PROP_SDK_STREAM_BITRATE:
+        g_value_set_int(value, src->sdk_stream_bitrate);
         break;
     case PROP_DEPTH_MIN:
         g_value_set_float(value, src->depth_min_dist);
@@ -3264,6 +3351,25 @@ static gboolean gst_zedsrc_start(GstBaseSrc *bsrc) {
     }
     // <---- Runtime parameters
 
+    // ----> SDK Streaming
+    if (src->sdk_stream_enable) {
+        sl::StreamingParameters streaming_params;
+        streaming_params.port = src->sdk_stream_port;
+        streaming_params.codec = static_cast<sl::STREAMING_CODEC>(src->sdk_stream_codec);
+        streaming_params.bitrate = src->sdk_stream_bitrate;
+
+        ret = src->zed.enableStreaming(streaming_params);
+        if (ret != sl::ERROR_CODE::SUCCESS) {
+            GST_ELEMENT_ERROR(src, RESOURCE, NOT_FOUND,
+                              ("Failed to enable streaming, '%s'", sl::toString(ret).c_str()), (NULL));
+            return FALSE;
+        }
+        GST_INFO(" * SDK Streaming enabled on port %d with codec %s and bitrate %d", src->sdk_stream_port, sl::toString(streaming_params.codec).c_str(), src->sdk_stream_bitrate);
+        GST_INFO("*** SDK Streaming enabled ***");
+        src->sdk_stream_active = TRUE;        
+    }
+    // <---- SDK Streaming
+
     // ----> Positional tracking
     GST_INFO("POSITIONAL TRACKING PARAMETERS");
     GST_INFO(" * Positional tracking status: %s", (src->pos_tracking ? "ON" : "OFF"));
@@ -3448,6 +3554,13 @@ static gboolean gst_zedsrc_stop(GstBaseSrc *bsrc) {
         src->zed.disableRecording();
         src->svo_rec_active = FALSE;
         GST_INFO_OBJECT(src, "SVO recording stopped on pipeline stop");
+    }
+
+    // Stop SDK streaming if active
+    if (src->sdk_stream_active) {
+        src->zed.disableStreaming();
+        src->sdk_stream_active = FALSE;
+        GST_INFO_OBJECT(src, "SDK streaming stopped on pipeline stop");
     }
 
     gst_zedsrc_reset(src);
