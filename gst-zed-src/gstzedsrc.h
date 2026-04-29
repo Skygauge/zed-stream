@@ -193,6 +193,11 @@ struct _GstZedSrc {
 
     gboolean stop_requested;
 
+#ifdef ENABLE_OPENCV_PREVIEW
+    gboolean preview_window_created;
+    gboolean preview_runtime_disabled;
+#endif
+
 #if defined(SL_ENABLE_ADVANCED_CAPTURE_API) && defined(HAVE_NVBUFSURFTRANSFORM)
     // Reusable destination surfaces for NV12 stereo side-by-side composition
 #define GST_ZEDSRC_STEREO_SBS_POOL_SIZE 4

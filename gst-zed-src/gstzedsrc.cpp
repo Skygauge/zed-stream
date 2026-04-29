@@ -23,6 +23,11 @@
 #include <gst/gst.h>
 #include <gst/video/video.h>
 
+#ifdef ENABLE_OPENCV_PREVIEW
+#include <opencv2/highgui.hpp>
+#include <opencv2/imgproc.hpp>
+#endif
+
 #ifdef SL_ENABLE_ADVANCED_CAPTURE_API
 #include <gst/allocators/gstdmabuf.h>
 #include <nvbufsurface.h>
@@ -45,6 +50,49 @@ GST_DEBUG_CATEGORY_STATIC(gst_zedsrc_debug);
 GST_DEBUG_CATEGORY_STATIC(gst_zedsrc_tracking_debug);
 GST_DEBUG_CATEGORY_STATIC(gst_zedsrc_od_debug);
 GST_DEBUG_CATEGORY_STATIC(gst_zedsrc_controls_debug);
+
+#ifdef ENABLE_OPENCV_PREVIEW
+static constexpr const char *GST_ZEDSRC_PREVIEW_WINDOW_NAME = "zedsrc-preview";
+
+static void gst_zedsrc_close_preview_window(GstZedSrc *src) {
+    if (!src->preview_window_created) {
+        return;
+    }
+
+    try {
+        cv::destroyWindow(GST_ZEDSRC_PREVIEW_WINDOW_NAME);
+    } catch (const cv::Exception &e) {
+        GST_WARNING_OBJECT(src, "Failed to destroy preview window: %s", e.what());
+    }
+
+    src->preview_window_created = FALSE;
+}
+
+static void gst_zedsrc_show_preview(GstZedSrc *src, const sl::Mat &frame) {
+    if (src->preview_runtime_disabled || frame.getWidth() == 0 || frame.getHeight() == 0) {
+        return;
+    }
+
+    try {
+        size_t step = static_cast<size_t>(frame.getWidth()) * sizeof(sl::uchar4);
+        cv::Mat bgra(frame.getHeight(), frame.getWidth(), CV_8UC4, frame.getPtr<sl::uchar4>(), step);
+        cv::Mat bgr;
+        cv::cvtColor(bgra, bgr, cv::COLOR_BGRA2BGR);
+
+        if (!src->preview_window_created) {
+            cv::namedWindow(GST_ZEDSRC_PREVIEW_WINDOW_NAME, cv::WINDOW_NORMAL);
+            src->preview_window_created = TRUE;
+        }
+
+        cv::imshow(GST_ZEDSRC_PREVIEW_WINDOW_NAME, bgr);
+        cv::waitKey(1);
+    } catch (const cv::Exception &e) {
+        GST_WARNING_OBJECT(src, "OpenCV preview disabled due to runtime error: %s", e.what());
+        src->preview_runtime_disabled = TRUE;
+        gst_zedsrc_close_preview_window(src);
+    }
+}
+#endif
 
 // Magic number constants
 #define GST_ZEDSRC_MAX_OBJECTS 256
@@ -1907,6 +1955,9 @@ static void gst_zedsrc_reset(GstZedSrc *src) {
 #if defined(SL_ENABLE_ADVANCED_CAPTURE_API) && defined(HAVE_NVBUFSURFTRANSFORM)
     gst_zedsrc_stereo_sbs_pool_cleanup(src, FALSE);
 #endif
+#ifdef ENABLE_OPENCV_PREVIEW
+    gst_zedsrc_close_preview_window(src);
+#endif
 
     if (src->zed.isOpened()) {
         src->zed.close();
@@ -2063,6 +2114,10 @@ static void gst_zedsrc_init(GstZedSrc *src) {
 
     src->stop_requested = FALSE;
     src->caps = NULL;
+#ifdef ENABLE_OPENCV_PREVIEW
+    src->preview_window_created = FALSE;
+    src->preview_runtime_disabled = FALSE;
+#endif
 
 #if defined(SL_ENABLE_ADVANCED_CAPTURE_API) && defined(HAVE_NVBUFSURFTRANSFORM)
     for (gint i = 0; i < GST_ZEDSRC_STEREO_SBS_POOL_SIZE; ++i) {
@@ -3079,6 +3134,11 @@ static gboolean gst_zedsrc_start(GstBaseSrc *bsrc) {
 
     GST_TRACE_OBJECT(src, "gst_zedsrc_calculate_caps");
 
+#ifdef ENABLE_OPENCV_PREVIEW
+    src->preview_runtime_disabled = FALSE;
+    GST_INFO_OBJECT(src, "OpenCV preview support is enabled");
+#endif
+
     // ----> Set init parameters
     sl::InitParameters init_params;
 
@@ -3563,6 +3623,9 @@ static gboolean gst_zedsrc_stop(GstBaseSrc *bsrc) {
         GST_INFO_OBJECT(src, "SDK streaming stopped on pipeline stop");
     }
 
+#ifdef ENABLE_OPENCV_PREVIEW
+    gst_zedsrc_close_preview_window(src);
+#endif
     gst_zedsrc_reset(src);
 
     return TRUE;
@@ -4184,6 +4247,12 @@ static GstFlowReturn gst_zedsrc_fill(GstPushSrc *psrc, GstBuffer *buf) {
         CHECK_RET_OR_GOTO(src->zed.retrieveMeasure(depth_data, sl::MEASURE::DEPTH, sl::MEM::CPU));
     }
 
+#ifdef ENABLE_OPENCV_PREVIEW
+    if (stream_type != GST_ZEDSRC_DEPTH_16 && left_img.getWidth() > 0 && left_img.getHeight() > 0) {
+        gst_zedsrc_show_preview(src, left_img);
+    }
+#endif
+
     /* --- Memory copy into GstBuffer ------------------------------------ */
     if (stream_type == GST_ZEDSRC_DEPTH_16) {
         memcpy(minfo.data, depth_data.getPtr<sl::ushort1>(), minfo.size);
@@ -4330,6 +4399,16 @@ static GstFlowReturn gst_zedsrc_create(GstPushSrc *psrc, GstBuffer **outbuf) {
         cuCtxPopCurrent_v2(NULL);
         return GST_FLOW_ERROR;
     }
+
+#ifdef ENABLE_OPENCV_PREVIEW
+    sl::Mat preview_frame;
+    ret = src->zed.retrieveImage(preview_frame, sl::VIEW::LEFT, sl::MEM::CPU);
+    if (ret == sl::ERROR_CODE::SUCCESS) {
+        gst_zedsrc_show_preview(src, preview_frame);
+    } else {
+        GST_DEBUG_OBJECT(src, "Preview retrieveImage failed: %s", sl::toString(ret).c_str());
+    }
+#endif
 
     // Get clock for timestamp
     clock = gst_element_get_clock(GST_ELEMENT(src));

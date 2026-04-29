@@ -15,9 +15,25 @@ endif()
 add_definitions(-Werror=return-type)
 
 option(LINK_SHARED_ZED "Link with the ZED SDK shared executable" ON)
+option(HEADLESS "Disable OpenCV preview window support in gst-zed-src" ON)
 
 if(NOT LINK_SHARED_ZED AND MSVC)
     message(FATAL_ERROR "LINK_SHARED_ZED OFF : ZED SDK static libraries not available on Windows")
+endif()
+
+set(PREVIEW_LIBS "")
+if(HEADLESS)
+    message(STATUS "HEADLESS=ON: OpenCV preview disabled in gst-zed-src")
+else()
+    find_package(OpenCV QUIET COMPONENTS core imgproc highgui)
+    if(OpenCV_FOUND)
+        add_definitions(-DENABLE_OPENCV_PREVIEW)
+        include_directories(${OpenCV_INCLUDE_DIRS})
+        list(APPEND PREVIEW_LIBS ${OpenCV_LIBRARIES})
+        message(STATUS "HEADLESS=OFF: OpenCV preview enabled in gst-zed-src")
+    else()
+        message(WARNING "HEADLESS=OFF requested but OpenCV was not found. Preview will remain disabled.")
+    endif()
 endif()
 
 set(SOURCES
@@ -120,6 +136,7 @@ if (WIN32)
         ${GSTREAMER_VIDEO_LIBRARY}
         gstzedmeta
         ${ZED_LIBS}
+        ${PREVIEW_LIBS}
         )
 else()
     target_link_libraries (${libname} LINK_PUBLIC
@@ -130,6 +147,7 @@ else()
         ${GSTREAMER_VIDEO_LIBRARY}
         ${ZED_LIBS}
         ${ZEROCOPY_LIBS}
+        ${PREVIEW_LIBS}
         ${CMAKE_CURRENT_BINARY_DIR}/../gst-zed-meta/libgstzedmeta.so
         )
 endif()
